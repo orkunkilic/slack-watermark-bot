@@ -81,6 +81,7 @@ app.command('/watermark', async ({ command, ack, respond, client }) => {
   if (!watermark) return respond("❗ Please provide watermark text: `/watermark john@example.com`");
 
   const result = await client.files.list({ user: command.user_id });
+  console.log("🧪 User files:", result.files.map(f => ({ name: f.name, type: f.filetype })));
   const pdf = result.files.find(f => f.filetype === 'pdf');
 
   if (!pdf) return respond("❌ No PDF found in recent uploads. Please upload a PDF first.");
