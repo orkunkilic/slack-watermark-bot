@@ -5,7 +5,6 @@ const express = require('express');
 const fs = require('fs');
 const path = require('path');
 const { PDFDocument, StandardFonts, rgb, degrees } = require('pdf-lib');
-const { convert } = require('pdf-poppler');
 const puppeteer = require('puppeteer');
 
 const app = new App({
