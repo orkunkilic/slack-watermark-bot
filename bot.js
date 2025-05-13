@@ -6,9 +6,10 @@ const fs = require('fs');
 const path = require('path');
 const { PDFDocument, StandardFonts, rgb, degrees } = require('pdf-lib');
 const { convert } = require('pdf-poppler');
+const puppeteer = require('puppeteer');
 
 const app = new App({
-  token: process.env.SLACK_BOT_TOKEN,
+    token: process.env.SLACK_BOT_TOKEN,
   signingSecret: process.env.SLACK_SIGNING_SECRET,
 });
 
@@ -39,30 +40,39 @@ async function addWatermark(input, output, watermarkText) {
   fs.writeFileSync(output, outputBytes);
 }
 
-// Convert PDF to PNGs and reassemble
-async function flattenPDF(pdfPath, outputPath) {
-  const pngDir = path.join(tmpDir, `png_${Date.now()}`);
-  fs.mkdirSync(pngDir);
+async function flattenPDF(inputPath, outputPath) {
+  const browser = await puppeteer.launch({
+    headless: 'new',
+    args: ['--no-sandbox', '--disable-setuid-sandbox']
+  });
+  const page = await browser.newPage();
 
-  await convert(pdfPath, {
-    format: 'png',
-    out_dir: pngDir,
-    out_prefix: 'page',
-    page: null,
+  const pdfBuffer = fs.readFileSync(inputPath);
+  const base64 = pdfBuffer.toString('base64');
+  await page.goto(`data:application/pdf;base64,${base64}`, { waitUntil: 'networkidle0' });
+
+  const numPages = await page.evaluate(() => {
+    return window.PDFViewerApplication?.pdfDocument?.numPages || 1;
   });
 
-  const images = fs.readdirSync(pngDir).filter(f => f.endsWith('.png')).sort();
   const pdfDoc = await PDFDocument.create();
 
-  for (const imgFile of images) {
-    const imgBytes = fs.readFileSync(path.join(pngDir, imgFile));
-    const image = await pdfDoc.embedPng(imgBytes);
-    const page = pdfDoc.addPage([image.width, image.height]);
-    page.drawImage(image, { x: 0, y: 0, width: image.width, height: image.height });
+  for (let i = 1; i <= numPages; i++) {
+    await page.evaluate((pageNum) => {
+      window.PDFViewerApplication.page = pageNum;
+    }, i);
+
+    await page.waitForTimeout(200); // wait for page to render
+
+    const screenshot = await page.screenshot({ fullPage: true });
+    const image = await pdfDoc.embedPng(screenshot);
+    const newPage = pdfDoc.addPage([image.width, image.height]);
+    newPage.drawImage(image, { x: 0, y: 0, width: image.width, height: image.height });
   }
 
-  const pdfBytes = await pdfDoc.save();
-  fs.writeFileSync(outputPath, pdfBytes);
+  const flattenedBytes = await pdfDoc.save();
+  fs.writeFileSync(outputPath, flattenedBytes);
+  await browser.close();
 }
 
 app.command('/watermark', async ({ command, ack, respond, client }) => {
