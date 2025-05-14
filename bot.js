@@ -1,21 +1,24 @@
+// slack_watermark_bot/bot.js
 require('dotenv').config();
 const { App } = require('@slack/bolt');
-const { WebClient } = require('@slack/web-api');
-const express = require('express');
+const { PDFDocument, StandardFonts, rgb, degrees } = require('pdf-lib');
+const fetch = require('node-fetch');
 const fs = require('fs');
 const path = require('path');
-const { PDFDocument, StandardFonts, rgb, degrees } = require('pdf-lib');
 const puppeteer = require('puppeteer');
-
-const app = new App({
-    token: process.env.SLACK_BOT_TOKEN,
-  signingSecret: process.env.SLACK_SIGNING_SECRET,
-});
 
 const tmpDir = './tmp';
 if (!fs.existsSync(tmpDir)) fs.mkdirSync(tmpDir);
 
-// Add watermark to PDF
+const userUploads = {}; // Store PDF per user_id
+
+const app = new App({
+  token: process.env.SLACK_BOT_TOKEN,
+  signingSecret: process.env.SLACK_SIGNING_SECRET,
+  socketMode: false,
+  port: process.env.PORT || 3000
+});
+
 async function addWatermark(input, output, watermarkText) {
   const bytes = fs.readFileSync(input);
   const pdfDoc = await PDFDocument.load(bytes);
@@ -24,7 +27,7 @@ async function addWatermark(input, output, watermarkText) {
 
   pages.forEach((page) => {
     const { width, height } = page.getSize();
-    page.drawText(`CONFIDENTIAL • ${watermarkText}`, {
+    page.drawText(`CONFIDENTIAL - ${watermarkText}`, {
       x: width / 2 - 250,
       y: height / 3,
       size: 36,
@@ -46,69 +49,71 @@ async function flattenPDF(inputPath, outputPath) {
   });
   const page = await browser.newPage();
 
-  const pdfBuffer = fs.readFileSync(inputPath);
-  const base64 = pdfBuffer.toString('base64');
+  const base64 = fs.readFileSync(inputPath).toString('base64');
   await page.goto(`data:application/pdf;base64,${base64}`, { waitUntil: 'networkidle0' });
-
-  const numPages = await page.evaluate(() => {
-    return window.PDFViewerApplication?.pdfDocument?.numPages || 1;
-  });
+  await page.waitForTimeout(500);
 
   const pdfDoc = await PDFDocument.create();
+  const screenshot = await page.screenshot({ fullPage: true });
+  const image = await pdfDoc.embedPng(screenshot);
+  const newPage = pdfDoc.addPage([image.width, image.height]);
+  newPage.drawImage(image, { x: 0, y: 0, width: image.width, height: image.height });
 
-  for (let i = 1; i <= numPages; i++) {
-    await page.evaluate((pageNum) => {
-      window.PDFViewerApplication.page = pageNum;
-    }, i);
-
-    await page.waitForTimeout(200); // wait for page to render
-
-    const screenshot = await page.screenshot({ fullPage: true });
-    const image = await pdfDoc.embedPng(screenshot);
-    const newPage = pdfDoc.addPage([image.width, image.height]);
-    newPage.drawImage(image, { x: 0, y: 0, width: image.width, height: image.height });
-  }
-
-  const flattenedBytes = await pdfDoc.save();
-  fs.writeFileSync(outputPath, flattenedBytes);
+  const pdfBytes = await pdfDoc.save();
+  fs.writeFileSync(outputPath, pdfBytes);
   await browser.close();
 }
 
+app.event('file_shared', async ({ event, client }) => {
+  try {
+    const fileId = event.file_id;
+    const info = await client.files.info({ file: fileId });
+    const file = info.file;
+
+    if (file && file.filetype === 'pdf') {
+      userUploads[event.user_id] = {
+        id: file.id,
+        name: file.name,
+        url: file.url_private_download
+      };
+    }
+  } catch (err) {
+    console.error('Error in file_shared:', err);
+  }
+});
+
 app.command('/watermark', async ({ command, ack, respond, client }) => {
   await ack();
-
   const watermark = command.text.trim();
-  if (!watermark) return respond("❗ Please provide watermark text: `/watermark john@example.com`");
+  const upload = userUploads[command.user_id];
 
-  const result = await client.files.list({ user: command.user_id });
-  console.log("🧪 User files:", result.files.map(f => ({ name: f.name, type: f.filetype })));
-  const pdf = result.files.find(f => f.filetype === 'pdf');
+  if (!upload || !watermark) {
+    return respond('❗ Please upload a PDF first, then run `/watermark your@email.com`');
+  }
 
-  if (!pdf) return respond("❌ No PDF found in recent uploads. Please upload a PDF first.");
+  const inputPath = `${tmpDir}/${upload.id}_original.pdf`;
+  const watermarkedPath = `${tmpDir}/${upload.id}_watermarked.pdf`;
+  const flattenedPath = `${tmpDir}/${upload.id}_flattened.pdf`;
 
-  const inputPath = `${tmpDir}/${pdf.id}_original.pdf`;
-  const watermarkedPath = `${tmpDir}/${pdf.id}_watermarked.pdf`;
-  const finalPath = `${tmpDir}/${pdf.id}_flattened.pdf`;
-
-  const fileRes = await fetch(pdf.url_private_download, {
+  const res = await fetch(upload.url, {
     headers: { Authorization: `Bearer ${process.env.SLACK_BOT_TOKEN}` },
   });
-  const buffer = await fileRes.buffer();
+  const buffer = await res.buffer();
   fs.writeFileSync(inputPath, buffer);
 
   await addWatermark(inputPath, watermarkedPath, `Shared with: ${watermark}`);
-  await flattenPDF(watermarkedPath, finalPath);
+  await flattenPDF(watermarkedPath, flattenedPath);
 
-  const upload = await client.files.upload({
+  await client.files.upload({
     channels: command.channel_id,
-    file: fs.createReadStream(finalPath),
+    file: fs.createReadStream(flattenedPath),
     title: `📄 Watermarked PDF for ${watermark}`,
   });
 
-  respond(`✅ Uploaded watermarked PDF: ${upload.file.permalink}`);
+  delete userUploads[command.user_id];
 });
 
 (async () => {
-  await app.start(process.env.PORT || 3000);
-  console.log('🚀 Slack watermark bot running');
+  await app.start();
+  console.log('🚀 Slack PDF Watermark Bot running...');
 })();
