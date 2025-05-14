@@ -12,6 +12,6 @@
     "pdf-lib": "^1.17.1",
     "sharp": "^0.34.1",
     "puppeteer": "^24.8.2",
-    "node-fetch": "^3.3.0"
+    "node-fetch": "^2.6.7"
   }
 }

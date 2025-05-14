@@ -5,6 +5,7 @@ const { PDFDocument, StandardFonts, rgb, degrees } = require('pdf-lib');
 const fs = require('fs');
 const path = require('path');
 const puppeteer = require('puppeteer');
+const fetch = require('node-fetch');
 
 const tmpDir = './tmp';
 if (!fs.existsSync(tmpDir)) fs.mkdirSync(tmpDir);
@@ -94,11 +95,11 @@ app.command('/watermark', async ({ command, ack, respond, client }) => {
   const watermarkedPath = `${tmpDir}/${upload.id}_watermarked.pdf`;
   const flattenedPath = `${tmpDir}/${upload.id}_flattened.pdf`;
 
-  const res = await fetch(upload.url, {
+  const response = await fetch(upload.url, {
     headers: { Authorization: `Bearer ${process.env.SLACK_BOT_TOKEN}` },
   });
-  const buffer = await res.buffer();
-  fs.writeFileSync(inputPath, buffer);
+  const buffer = await response.arrayBuffer();
+  fs.writeFileSync(inputPath, Buffer.from(buffer));
 
   await addWatermark(inputPath, watermarkedPath, `Shared with: ${watermark}`);
   await flattenPDF(watermarkedPath, flattenedPath);
